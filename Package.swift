@@ -8,11 +8,11 @@ let package = Package(
         .macOS(.v13)
     ],
     products: [
-        .executable(name: "s3-mac-browser", targets: ["S3MacBrowserDemoApp"])
+        .library(name: "S3MacBrowserCore", targets: ["S3MacBrowserCore"])
     ],
     targets: [
-        .executableTarget(
-            name: "S3MacBrowserDemoApp",
+        .target(
+            name: "S3MacBrowserCore",
             path: "Sources/S3MacBrowserDemoApp",
             exclude: ["MetricsTests.swift"],
             resources: [
@@ -21,7 +21,7 @@ let package = Package(
         ),
         .testTarget(
             name: "S3MacBrowserDemoAppTests",
-            dependencies: ["S3MacBrowserDemoApp"],
+            dependencies: ["S3MacBrowserCore"],
             path: "Sources/S3MacBrowserDemoApp",
             exclude: ["Localization", "Models", "Services", "ViewModels", "Views", "S3MacBrowserDemoApp.swift"],
             sources: ["MetricsTests.swift"]

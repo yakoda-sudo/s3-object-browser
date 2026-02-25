@@ -40,6 +40,7 @@ final class ConnectionViewModel: ObservableObject {
     @Published var canPagePrev: Bool = false
     @Published var recentTransfers: [TransferItem] = []
     @Published var provider: StorageProvider = .s3
+    @Published private(set) var bucketRegions: [String: String] = [:]
     @Published private var uploadTotalBytes: Int64 = 0
     @Published private var uploadDoneBytes: Int64 = 0
     @Published private var uploadLastSent: Int64 = 0
@@ -48,7 +49,7 @@ final class ConnectionViewModel: ObservableObject {
     @Published private var downloadLastReceived: Int64 = 0
     @AppStorage("ui.showVersionsDeleted") var showVersionsDeleted: Bool = false
 
-    private let s3Backend: StorageBackend
+    private let s3Backend: S3Backend
     private let azureBackend: StorageBackend
     private var currentContinuationToken: String?
     private var nextContinuationToken: String?
@@ -61,11 +62,18 @@ final class ConnectionViewModel: ObservableObject {
             selectedDebugIndex = 0
             return
         }
-        debugHistory.insert(DebugEntry(title: title, text: text), at: 0)
-        if debugHistory.count > 12 {
-            debugHistory = Array(debugHistory.prefix(12))
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            if self.debugHistory.first?.text == text {
+                self.selectedDebugIndex = 0
+                return
+            }
+            self.debugHistory.insert(DebugEntry(title: title, text: text), at: 0)
+            if self.debugHistory.count > 12 {
+                self.debugHistory = Array(self.debugHistory.prefix(12))
+            }
+            self.selectedDebugIndex = 0
         }
-        selectedDebugIndex = 0
     }
 
     private func debugTitle(from text: String) -> String {
@@ -83,7 +91,7 @@ final class ConnectionViewModel: ObservableObject {
         return method
     }
 
-    init(s3Backend: StorageBackend = S3Backend(), azureBackend: StorageBackend = AzureBlobBackend()) {
+    init(s3Backend: S3Backend = S3Backend(), azureBackend: StorageBackend = AzureBlobBackend()) {
         self.s3Backend = s3Backend
         self.azureBackend = azureBackend
         loadProfiles()
@@ -102,12 +110,13 @@ final class ConnectionViewModel: ObservableObject {
         responseText = nil
         debugText = ""
 
-        let backend = backend(for: endpoint)
+        let (effectiveEndpoint, effectiveRegion) = resolveListBucketsContext(for: endpoint)
+        let backend = backend(for: effectiveEndpoint)
         Task {
             do {
                 let result = try await backend.testConnection(
-                    endpoint: endpoint,
-                    region: region,
+                    endpoint: effectiveEndpoint,
+                    region: effectiveRegion,
                     accessKey: accessKey,
                     secretKey: secretKey,
                     allowInsecure: insecureSSL,
@@ -130,6 +139,10 @@ final class ConnectionViewModel: ObservableObject {
                     objects = result.bucketNames.map { name in
                         S3Object(key: name, sizeBytes: 0, lastModified: Date(), contentType: "bucket", eTag: "")
                     }
+                }
+                if endpoint.provider == .s3, isAWS(endpoint) {
+                    bucketRegions = [:]
+                    loadBucketRegions(for: objects, endpoint: endpoint)
                 }
                 if endpoint.provider == .azureBlob, result.bucketNames.isEmpty, endpoint.container == nil {
                     statusMessage = "Connected (no containers found). Use a container SAS URL or create a container."
@@ -353,13 +366,14 @@ final class ConnectionViewModel: ObservableObject {
         }
 
         do {
+            let (bucketEndpoint, bucketRegion) = await resolveBucketContext(bucket: bucket, endpoint: endpoint)
             let result: ConnectionResult
             if showVersionsDeleted {
                 result = try await backend(for: endpoint).listObjectVersions(
-                    endpoint: endpoint,
+                    endpoint: bucketEndpoint,
                     bucket: bucket,
                     prefix: prefix,
-                    region: region,
+                    region: bucketRegion,
                     accessKey: accessKey,
                     secretKey: secretKey,
                     allowInsecure: insecureSSL,
@@ -367,11 +381,11 @@ final class ConnectionViewModel: ObservableObject {
                 )
             } else {
                 result = try await backend(for: endpoint).listObjects(
-                    endpoint: endpoint,
+                    endpoint: bucketEndpoint,
                     bucket: bucket,
                     prefix: prefix,
                     continuationToken: continuationToken,
-                    region: region,
+                    region: bucketRegion,
                     accessKey: accessKey,
                     secretKey: secretKey,
                     allowInsecure: insecureSSL,
@@ -481,11 +495,12 @@ final class ConnectionViewModel: ObservableObject {
         debugText = ""
 
         do {
+            let (bucketEndpoint, bucketRegion) = await resolveBucketContext(bucket: bucket, endpoint: endpoint)
             let result = try await backend(for: endpoint).headObject(
-                endpoint: endpoint,
+                endpoint: bucketEndpoint,
                 bucket: bucket,
                 key: object.key,
-                region: region,
+                region: bucketRegion,
                 accessKey: accessKey,
                 secretKey: secretKey,
                 allowInsecure: insecureSSL,
@@ -520,7 +535,7 @@ final class ConnectionViewModel: ObservableObject {
         isBusy = false
     }
 
-    func shareLink(for object: S3Object, expiresHours: Int) -> String? {
+    func shareLink(for object: S3Object, expiresHours: Int) async -> String? {
         guard let bucket = currentBucket,
               let endpoint = resolveEndpoint() else {
             return nil
@@ -531,11 +546,12 @@ final class ConnectionViewModel: ObservableObject {
         if object.isDeleteMarker || object.isDeleted || object.isVersioned {
             return nil
         }
-        return backend(for: endpoint).shareLink(
-            endpoint: endpoint,
+        let context = await resolveBucketContext(bucket: bucket, endpoint: endpoint)
+        return backend(for: context.endpoint).shareLink(
+            endpoint: context.endpoint,
             bucket: bucket,
             key: object.key,
-            region: region,
+            region: context.region,
             accessKey: accessKey,
             secretKey: secretKey,
             expiresHours: expiresHours
@@ -594,6 +610,7 @@ final class ConnectionViewModel: ObservableObject {
             let totalBytes = targets.reduce(0) { $0 + $1.size }
             uploadTotalBytes = totalBytes
             uploadDoneBytes = 0
+            let context = await resolveBucketContext(bucket: bucket, endpoint: endpoint)
 
             for target in targets {
                 do {
@@ -605,14 +622,14 @@ final class ConnectionViewModel: ObservableObject {
 
                     let settings = loadUploadParameters(profileName: activeProfileName)
 
-                    let result = try await backend(for: endpoint).uploadFileWithProgress(
-                        endpoint: endpoint,
+                    let result = try await backend(for: context.endpoint).uploadFileWithProgress(
+                        endpoint: context.endpoint,
                         bucket: bucket,
                         key: target.key,
                         fileURL: target.fileURL,
                         contentType: target.contentType,
                         settings: settings,
-                        region: region,
+                        region: context.region,
                         accessKey: accessKey,
                         secretKey: secretKey,
                         allowInsecure: insecureSSL,
@@ -688,6 +705,7 @@ final class ConnectionViewModel: ObservableObject {
             isBusy = true
             statusMessage = "Deleting..."
             var deletedCount = 0
+            let context = await resolveBucketContext(bucket: bucket, endpoint: endpoint)
 
             for object in targets {
                 if object.contentType == "bucket" {
@@ -699,11 +717,11 @@ final class ConnectionViewModel: ObservableObject {
                    !versionId.isEmpty {
                     do {
                         let result = try await backend(for: endpoint).deleteObjectVersion(
-                            endpoint: endpoint,
+                            endpoint: context.endpoint,
                             bucket: bucket,
                             key: object.key,
                             versionId: versionId,
-                            region: region,
+                            region: context.region,
                             accessKey: accessKey,
                             secretKey: secretKey,
                             allowInsecure: insecureSSL,
@@ -724,11 +742,11 @@ final class ConnectionViewModel: ObservableObject {
                     if !versionId.isEmpty || object.isDeleted {
                     do {
                         let result = try await backend(for: endpoint).deleteObjectVersion(
-                            endpoint: endpoint,
+                            endpoint: context.endpoint,
                             bucket: bucket,
                             key: object.key,
                             versionId: versionId,
-                            region: region,
+                            region: context.region,
                             accessKey: accessKey,
                             secretKey: secretKey,
                             allowInsecure: insecureSSL,
@@ -749,10 +767,10 @@ final class ConnectionViewModel: ObservableObject {
                     let prefix = object.key
                     do {
                         let allObjects = try await backend(for: endpoint).listAllObjects(
-                            endpoint: endpoint,
+                            endpoint: context.endpoint,
                             bucket: bucket,
                             prefix: prefix,
-                            region: region,
+                            region: context.region,
                             accessKey: accessKey,
                             secretKey: secretKey,
                             allowInsecure: insecureSSL,
@@ -760,10 +778,10 @@ final class ConnectionViewModel: ObservableObject {
                         )
                         for entry in allObjects where !entry.key.hasSuffix("/") {
                             let result = try await backend(for: endpoint).deleteObject(
-                                endpoint: endpoint,
+                                endpoint: context.endpoint,
                                 bucket: bucket,
                                 key: entry.key,
-                                region: region,
+                                region: context.region,
                                 accessKey: accessKey,
                                 secretKey: secretKey,
                                 allowInsecure: insecureSSL,
@@ -775,10 +793,10 @@ final class ConnectionViewModel: ObservableObject {
                             updateDebug(from: result)
                         }
                         _ = try await backend(for: endpoint).deleteObject(
-                            endpoint: endpoint,
+                            endpoint: context.endpoint,
                             bucket: bucket,
                             key: prefix,
-                            region: region,
+                            region: context.region,
                             accessKey: accessKey,
                             secretKey: secretKey,
                             allowInsecure: insecureSSL,
@@ -791,10 +809,10 @@ final class ConnectionViewModel: ObservableObject {
                 } else {
                     do {
                         let result = try await backend(for: endpoint).deleteObject(
-                            endpoint: endpoint,
+                            endpoint: context.endpoint,
                             bucket: bucket,
                             key: object.key,
-                            region: region,
+                            region: context.region,
                             accessKey: accessKey,
                             secretKey: secretKey,
                             allowInsecure: insecureSSL,
@@ -883,6 +901,205 @@ final class ConnectionViewModel: ObservableObject {
         }
     }
 
+    func createBucket(name: String, region: String, enableVersioning: Bool, enableObjectLock: Bool) async throws -> ConnectionResult {
+        guard let endpoint = resolveEndpoint() else {
+            statusMessage = "Invalid endpoint URL"
+            throw URLError(.badURL)
+        }
+        provider = endpoint.provider
+        let context = resolveCreateBucketContext(endpoint: endpoint, region: region)
+        let backend = backend(for: context.endpoint)
+
+        isBusy = true
+        statusMessage = "Creating bucket..."
+        defer { isBusy = false }
+
+        let result = try await backend.createBucket(
+            endpoint: context.endpoint,
+            bucket: name,
+            region: context.region,
+            accessKey: accessKey,
+            secretKey: secretKey,
+            allowInsecure: insecureSSL,
+            enableVersioning: enableVersioning,
+            enableObjectLock: enableObjectLock,
+            profileName: activeProfileName
+        )
+
+        lastStatusCode = result.statusCode
+        responseText = result.responseText
+        updateDebug(from: result)
+
+        if let status = result.statusCode, status >= 400 {
+            statusMessage = "Create bucket failed"
+        } else {
+            statusMessage = "Bucket created"
+            if endpoint.provider == .s3, isAWS(endpoint) {
+                bucketRegions[name] = context.region
+            }
+        }
+        return result
+    }
+
+    func createContainer(name: String, publicAccess: AzurePublicAccess) async throws -> ConnectionResult {
+        guard let endpoint = resolveEndpoint() else {
+            statusMessage = "Invalid endpoint URL"
+            throw URLError(.badURL)
+        }
+        provider = endpoint.provider
+        let backend = backend(for: endpoint)
+
+        isBusy = true
+        statusMessage = "Creating container..."
+        defer { isBusy = false }
+
+        let result = try await backend.createContainer(
+            endpoint: endpoint,
+            name: name,
+            publicAccess: publicAccess,
+            allowInsecure: insecureSSL,
+            profileName: activeProfileName
+        )
+
+        lastStatusCode = result.statusCode
+        responseText = result.responseText
+        updateDebug(from: result)
+
+        if let status = result.statusCode, status >= 400 {
+            statusMessage = "Create container failed"
+        } else {
+            statusMessage = "Container created"
+        }
+        return result
+    }
+
+    func s3URI(for object: S3Object) -> String? {
+        guard provider == .s3 else { return nil }
+        if object.contentType == "bucket" {
+            return "s3://\(object.key)/"
+        }
+        guard let bucket = currentBucket else { return nil }
+        return "s3://\(bucket)/\(object.key)"
+    }
+
+    func azureURI(for object: S3Object) -> String? {
+        guard provider == .azureBlob else { return nil }
+        guard let endpoint = resolveEndpoint(), let host = endpoint.baseURL.host else { return nil }
+        let container = endpoint.container ?? currentBucket
+        if object.contentType == "bucket" {
+            let containerName = object.key
+            return "https://\(host)/\(containerName)/"
+        }
+        guard let containerName = container, !containerName.isEmpty else { return nil }
+        if object.key.hasSuffix("/") {
+            return "https://\(host)/\(containerName)/\(object.key)"
+        }
+        return "https://\(host)/\(containerName)/\(object.key)"
+    }
+
+    func copyURI(for object: S3Object) -> String? {
+        if let uri = s3URI(for: object) {
+            return uri
+        }
+        if let uri = azureURI(for: object) {
+            return uri
+        }
+        return nil
+    }
+
+    func canCreateContainer() -> Bool {
+        guard let endpoint = resolveEndpoint(), endpoint.provider == .azureBlob else { return false }
+        return endpoint.isAzureAccountSAS
+    }
+
+    func deleteBucketOrContainer(name: String) async throws -> ConnectionResult {
+        guard let endpoint = resolveEndpoint() else {
+            statusMessage = "Invalid endpoint URL"
+            throw URLError(.badURL)
+        }
+        provider = endpoint.provider
+        let backend = backend(for: endpoint)
+
+        isBusy = true
+        statusMessage = "Deleting..."
+        defer { isBusy = false }
+
+        let result: ConnectionResult
+        if endpoint.provider == .azureBlob {
+            result = try await backend.deleteContainer(
+                endpoint: endpoint,
+                name: name,
+                allowInsecure: insecureSSL,
+                profileName: activeProfileName
+            )
+        } else {
+            if isAWS(endpoint) {
+                let context = await resolveBucketContext(bucket: name, endpoint: endpoint)
+                result = try await backend.deleteBucket(
+                    endpoint: context.endpoint,
+                    bucket: name,
+                    region: context.region,
+                    accessKey: accessKey,
+                    secretKey: secretKey,
+                    allowInsecure: insecureSSL,
+                    profileName: activeProfileName
+                )
+                bucketRegions[name] = nil
+            } else {
+            result = try await backend.deleteBucket(
+                endpoint: endpoint,
+                bucket: name,
+                region: region,
+                accessKey: accessKey,
+                secretKey: secretKey,
+                allowInsecure: insecureSSL,
+                profileName: activeProfileName
+            )
+            }
+        }
+
+        lastStatusCode = result.statusCode
+        responseText = result.responseText
+        updateDebug(from: result)
+
+        if let status = result.statusCode, status >= 400 {
+            statusMessage = "Delete failed"
+        } else {
+            statusMessage = "Deleted"
+        }
+        return result
+    }
+
+    func localizedDeleteError(provider: StorageProvider, responseText: String?, statusCode: Int?) -> String? {
+        let text = responseText ?? ""
+        if provider == .s3 {
+            if text.contains("BucketNotEmpty") || statusCode == 409 {
+                return Localization.t("error.s3BucketNotEmpty")
+            }
+        } else if provider == .azureBlob {
+            if text.contains("ContainerNotFound") { return Localization.t("error.azureContainerNotFound") }
+            if text.contains("LeaseIdMissing") || text.contains("LeaseNotPresentWithContainerOperation") {
+                return Localization.t("error.azureLeaseMissing")
+            }
+            if text.contains("ContainerHasLegalHold") {
+                return Localization.t("error.azureLegalHold")
+            }
+        }
+        let code = extractErrorCode(text) ?? statusCode.map { "HTTP \($0)" }
+        if let code {
+            return String(format: Localization.t("error.deleteFailedWithCode"), code)
+        }
+        return Localization.t("error.deleteFailedGeneric")
+    }
+
+    private func extractErrorCode(_ text: String) -> String? {
+        guard let start = text.range(of: "<Code>"),
+              let end = text.range(of: "</Code>"),
+              start.upperBound < end.lowerBound else { return nil }
+        let code = String(text[start.upperBound..<end.lowerBound]).trimmingCharacters(in: .whitespacesAndNewlines)
+        return code.isEmpty ? nil : code
+    }
+
     func setShowVersionsDeleted(_ isOn: Bool) {
         showVersionsDeleted = isOn
         refreshCurrentView()
@@ -909,11 +1126,12 @@ final class ConnectionViewModel: ObservableObject {
                 for bucketObject in bucketTargets {
                     let bucketName = bucketObject.key
                     do {
+                        let context = await resolveBucketContext(bucket: bucketName, endpoint: endpoint)
                         let allObjects = try await backend(for: endpoint).listAllObjects(
-                            endpoint: endpoint,
+                            endpoint: context.endpoint,
                             bucket: bucketName,
                             prefix: "",
-                            region: region,
+                            region: context.region,
                             accessKey: accessKey,
                             secretKey: secretKey,
                             allowInsecure: insecureSSL,
@@ -983,14 +1201,15 @@ final class ConnectionViewModel: ObservableObject {
 
     private func expandFolders(_ objects: [S3Object], endpoint: StorageEndpoint, bucket: String) async -> [S3Object] {
         var results: [S3Object] = []
+        let context = await resolveBucketContext(bucket: bucket, endpoint: endpoint)
         for object in objects {
             if object.key.hasSuffix("/") {
                 do {
                     let allObjects = try await backend(for: endpoint).listAllObjects(
-                        endpoint: endpoint,
+                        endpoint: context.endpoint,
                         bucket: bucket,
                         prefix: object.key,
-                        region: region,
+                        region: context.region,
                         accessKey: accessKey,
                         secretKey: secretKey,
                         allowInsecure: insecureSSL,
@@ -1016,6 +1235,7 @@ final class ConnectionViewModel: ObservableObject {
         currentTransferItem = ""
         currentTransferProgress = 0
         var completed = 0
+        let context = await resolveBucketContext(bucket: bucket, endpoint: endpoint)
 
         for object in objects {
             do {
@@ -1027,11 +1247,11 @@ final class ConnectionViewModel: ObservableObject {
                 let result: ObjectDataResult
                 if shouldUseVersionedOperations(for: object, endpoint: endpoint), let versionId = object.versionId {
                     result = try await backend(for: endpoint).getObjectVersionWithProgress(
-                        endpoint: endpoint,
+                        endpoint: context.endpoint,
                         bucket: bucket,
                         key: object.key,
                         versionId: versionId,
-                        region: region,
+                        region: context.region,
                         accessKey: accessKey,
                         secretKey: secretKey,
                         allowInsecure: insecureSSL,
@@ -1051,10 +1271,10 @@ final class ConnectionViewModel: ObservableObject {
                     }
                 } else {
                     result = try await backend(for: endpoint).getObjectWithProgress(
-                        endpoint: endpoint,
+                        endpoint: context.endpoint,
                         bucket: bucket,
                         key: object.key,
-                        region: region,
+                        region: context.region,
                         accessKey: accessKey,
                         secretKey: secretKey,
                         allowInsecure: insecureSSL,
@@ -1303,6 +1523,114 @@ final class ConnectionViewModel: ObservableObject {
 
     private func resolveEndpoint() -> StorageEndpoint? {
         StorageEndpointParser.parse(input: endpointURL)
+    }
+
+    private func resolveListBucketsContext(for endpoint: StorageEndpoint) -> (endpoint: StorageEndpoint, region: String) {
+        guard endpoint.provider == .s3, isAWS(endpoint) else {
+            return (endpoint, region)
+        }
+        let globalURL = awsEndpointURL(baseURL: endpoint.baseURL, region: "us-east-1")
+        let globalEndpoint = StorageEndpoint(
+            provider: .s3,
+            rawInput: endpoint.rawInput,
+            baseURL: globalURL,
+            sasToken: nil,
+            container: nil
+        )
+        return (globalEndpoint, "us-east-1")
+    }
+
+    private func resolveCreateBucketContext(endpoint: StorageEndpoint, region: String) -> (endpoint: StorageEndpoint, region: String) {
+        guard endpoint.provider == .s3, isAWS(endpoint) else {
+            return (endpoint, region)
+        }
+        let normalized = normalizeAWSRegion(region)
+        let url = awsEndpointURL(baseURL: endpoint.baseURL, region: normalized)
+        let updated = StorageEndpoint(
+            provider: .s3,
+            rawInput: endpoint.rawInput,
+            baseURL: url,
+            sasToken: nil,
+            container: nil
+        )
+        return (updated, normalized)
+    }
+
+    private func resolveBucketContext(bucket: String, endpoint: StorageEndpoint) async -> (endpoint: StorageEndpoint, region: String) {
+        guard endpoint.provider == .s3, isAWS(endpoint) else {
+            return (endpoint, region)
+        }
+        let bucketRegion = await resolveBucketRegion(bucket: bucket, endpoint: endpoint)
+        let url = awsEndpointURL(baseURL: endpoint.baseURL, region: bucketRegion)
+        let updated = StorageEndpoint(
+            provider: .s3,
+            rawInput: endpoint.rawInput,
+            baseURL: url,
+            sasToken: nil,
+            container: nil
+        )
+        return (updated, bucketRegion)
+    }
+
+    private func resolveBucketRegion(bucket: String, endpoint: StorageEndpoint) async -> String {
+        if let cached = bucketRegions[bucket], !cached.isEmpty {
+            return cached
+        }
+        guard isAWS(endpoint) else { return region }
+        let listContext = resolveListBucketsContext(for: endpoint)
+        do {
+            let (_, location) = try await s3Backend.getBucketLocation(
+                endpoint: listContext.endpoint,
+                bucket: bucket,
+                region: listContext.region,
+                accessKey: accessKey,
+                secretKey: secretKey,
+                allowInsecure: insecureSSL,
+                profileName: activeProfileName
+            )
+            let normalized = normalizeAWSRegion(location)
+            bucketRegions[bucket] = normalized
+            if let index = objects.firstIndex(where: { $0.key == bucket && $0.contentType == "bucket" }) {
+                objects[index].region = normalized
+            }
+            return normalized
+        } catch {
+            return region
+        }
+    }
+
+    private func loadBucketRegions(for buckets: [S3Object], endpoint: StorageEndpoint) {
+        guard isAWS(endpoint) else { return }
+        Task { [weak self] in
+            guard let self else { return }
+            for bucket in buckets where bucket.contentType == "bucket" {
+                _ = await resolveBucketRegion(bucket: bucket.key, endpoint: endpoint)
+            }
+        }
+    }
+
+    private func isAWS(_ endpoint: StorageEndpoint) -> Bool {
+        guard endpoint.provider == .s3, let host = endpoint.baseURL.host?.lowercased() else {
+            return false
+        }
+        return host.contains("amazonaws.com")
+    }
+
+    private func normalizeAWSRegion(_ value: String?) -> String {
+        let trimmed = (value ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.isEmpty { return "us-east-1" }
+        if trimmed == "EU" { return "eu-west-1" }
+        return trimmed
+    }
+
+    private func awsEndpointURL(baseURL: URL, region: String) -> URL {
+        let scheme = baseURL.scheme ?? "https"
+        let normalized = normalizeAWSRegion(region)
+        let host = normalized == "us-east-1" ? "s3.amazonaws.com" : "s3.\(normalized).amazonaws.com"
+        var components = URLComponents()
+        components.scheme = scheme
+        components.host = host
+        return components.url ?? baseURL
     }
 
     private func backend(for endpoint: StorageEndpoint) -> StorageBackend {

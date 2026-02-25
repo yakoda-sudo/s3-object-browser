@@ -3,7 +3,7 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 APP_NAME="s3-mac-browser"
-VERSION="0.9.2"
+VERSION="1.0.1"
 DIST_DIR="$ROOT_DIR/dist"
 STAGING="$ROOT_DIR/.dmg-staging"
 DMG_RW="$DIST_DIR/${APP_NAME}-${VERSION}-rw.dmg"

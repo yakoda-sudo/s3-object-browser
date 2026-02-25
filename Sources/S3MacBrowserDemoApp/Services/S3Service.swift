@@ -43,6 +43,9 @@ struct ObjectDataResult {
 
 protocol S3ServiceProtocol: Sendable {
     func listBuckets(endpoint: URL, region: String, accessKey: String, secretKey: String, allowInsecure: Bool, profileName: String) async throws -> ConnectionResult
+    func getBucketLocation(endpoint: URL, bucket: String, region: String, accessKey: String, secretKey: String, allowInsecure: Bool, profileName: String) async throws -> (ConnectionResult, String?)
+    func createBucket(endpoint: URL, bucket: String, region: String, accessKey: String, secretKey: String, allowInsecure: Bool, enableVersioning: Bool, enableObjectLock: Bool, profileName: String) async throws -> ConnectionResult
+    func deleteBucket(endpoint: URL, bucket: String, region: String, accessKey: String, secretKey: String, allowInsecure: Bool, profileName: String) async throws -> ConnectionResult
     func listObjects(endpoint: URL, bucket: String, prefix: String, continuationToken: String?, region: String, accessKey: String, secretKey: String, allowInsecure: Bool, profileName: String) async throws -> ConnectionResult
     func listObjectVersions(endpoint: URL, bucket: String, prefix: String, keyMarker: String?, versionIdMarker: String?, region: String, accessKey: String, secretKey: String, allowInsecure: Bool, profileName: String) async throws -> ConnectionResult
     func headObject(endpoint: URL, bucket: String, key: String, region: String, accessKey: String, secretKey: String, allowInsecure: Bool, profileName: String) async throws -> ConnectionResult
@@ -94,6 +97,146 @@ final class S3Service: NSObject, S3ServiceProtocol, @unchecked Sendable {
             responseHeaders: headerMap,
             requestSummary: requestSummary,
             objectEntries: bucketEntries,
+            objectInfo: nil
+        )
+    }
+
+    func getBucketLocation(endpoint: URL, bucket: String, region: String, accessKey: String, secretKey: String, allowInsecure: Bool, profileName: String) async throws -> (ConnectionResult, String?) {
+        let start = Date()
+        let requestURL = makeBucketLocationURL(endpoint: endpoint, bucket: bucket)
+        var request = URLRequest(url: requestURL)
+        request.httpMethod = "GET"
+        request.timeoutInterval = timeout
+        signRequest(&request, region: region, accessKey: accessKey, secretKey: secretKey, payloadHash: sha256Hex(""))
+
+        let session = makeSession(allowInsecure: allowInsecure)
+        let (data, response) = try await session.data(for: request)
+
+        let elapsed = Int(Date().timeIntervalSince(start) * 1000)
+        let http = response as? HTTPURLResponse
+        let text = String(data: data, encoding: .utf8)
+        let headerMap = (http?.allHeaderFields ?? [:]).reduce(into: [String: String]()) { partial, entry in
+            let key = String(describing: entry.key)
+            let value = String(describing: entry.value)
+            partial[key] = value
+        }
+        let requestSummary = makeRequestSummary(request: request)
+        Task { await metricsRecorder.record(category: .list, uploaded: 0, downloaded: Int64(data.count), profileName: profileName) }
+
+        let result = ConnectionResult(
+            statusCode: http?.statusCode,
+            responseText: text,
+            elapsedMs: elapsed,
+            bucketNames: [],
+            responseHeaders: headerMap,
+            requestSummary: requestSummary,
+            objectEntries: [],
+            objectInfo: nil
+        )
+
+        let location = parseBucketLocation(from: data)
+        return (result, location)
+    }
+
+    func createBucket(endpoint: URL, bucket: String, region: String, accessKey: String, secretKey: String, allowInsecure: Bool, enableVersioning: Bool, enableObjectLock: Bool, profileName: String) async throws -> ConnectionResult {
+        let start = Date()
+        let requestURL = makeBucketURL(endpoint: endpoint, bucket: bucket)
+        var request = URLRequest(url: requestURL)
+        request.httpMethod = "PUT"
+        request.timeoutInterval = timeout
+
+        let normalizedRegion = region.trimmingCharacters(in: .whitespacesAndNewlines)
+        var bodyData: Data?
+        if !normalizedRegion.isEmpty && normalizedRegion.lowercased() != "us-east-1" {
+            let xml = """
+            <CreateBucketConfiguration xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
+              <LocationConstraint>\(normalizedRegion)</LocationConstraint>
+            </CreateBucketConfiguration>
+            """
+            bodyData = Data(xml.utf8)
+            request.setValue("application/xml", forHTTPHeaderField: "Content-Type")
+        }
+
+        if enableObjectLock {
+            request.setValue("true", forHTTPHeaderField: "x-amz-bucket-object-lock-enabled")
+        }
+        if let bodyData {
+            request.httpBody = bodyData
+        }
+
+        let payloadHash = sha256Hex(bodyData ?? Data())
+        signRequest(&request, region: region, accessKey: accessKey, secretKey: secretKey, payloadHash: payloadHash)
+
+        let session = makeSession(allowInsecure: allowInsecure)
+        let (data, response) = try await session.data(for: request)
+        let elapsed = Int(Date().timeIntervalSince(start) * 1000)
+        let http = response as? HTTPURLResponse
+        let text = String(data: data, encoding: .utf8)
+        let headerMap = (http?.allHeaderFields ?? [:]).reduce(into: [String: String]()) { partial, entry in
+            let key = String(describing: entry.key)
+            let value = String(describing: entry.value)
+            partial[key] = value
+        }
+        let requestSummary = makeRequestSummary(request: request)
+        Task { await metricsRecorder.record(category: .put, uploaded: Int64(bodyData?.count ?? 0), downloaded: Int64(data.count), profileName: profileName) }
+
+        var result = ConnectionResult(
+            statusCode: http?.statusCode,
+            responseText: text,
+            elapsedMs: elapsed,
+            bucketNames: [],
+            responseHeaders: headerMap,
+            requestSummary: requestSummary,
+            objectEntries: [],
+            objectInfo: nil
+        )
+
+        if enableVersioning, let status = http?.statusCode, status < 400 {
+            result = try await putBucketVersioning(
+                endpoint: endpoint,
+                bucket: bucket,
+                region: region,
+                accessKey: accessKey,
+                secretKey: secretKey,
+                allowInsecure: allowInsecure,
+                profileName: profileName
+            )
+        }
+
+        return result
+    }
+
+    func deleteBucket(endpoint: URL, bucket: String, region: String, accessKey: String, secretKey: String, allowInsecure: Bool, profileName: String) async throws -> ConnectionResult {
+        let start = Date()
+        let requestURL = makeBucketURL(endpoint: endpoint, bucket: bucket)
+        var request = URLRequest(url: requestURL)
+        request.httpMethod = "DELETE"
+        request.timeoutInterval = timeout
+
+        let payloadHash = sha256Hex(Data())
+        signRequest(&request, region: region, accessKey: accessKey, secretKey: secretKey, payloadHash: payloadHash)
+
+        let session = makeSession(allowInsecure: allowInsecure)
+        let (data, response) = try await session.data(for: request)
+        let elapsed = Int(Date().timeIntervalSince(start) * 1000)
+        let http = response as? HTTPURLResponse
+        let text = String(data: data, encoding: .utf8)
+        let headerMap = (http?.allHeaderFields ?? [:]).reduce(into: [String: String]()) { partial, entry in
+            let key = String(describing: entry.key)
+            let value = String(describing: entry.value)
+            partial[key] = value
+        }
+        let requestSummary = makeRequestSummary(request: request)
+        Task { await metricsRecorder.record(category: .delete, uploaded: 0, downloaded: Int64(data.count), profileName: profileName) }
+
+        return ConnectionResult(
+            statusCode: http?.statusCode,
+            responseText: text,
+            elapsedMs: elapsed,
+            bucketNames: [],
+            responseHeaders: headerMap,
+            requestSummary: requestSummary,
+            objectEntries: [],
             objectInfo: nil
         )
     }
@@ -639,6 +782,14 @@ final class S3Service: NSObject, S3ServiceProtocol, @unchecked Sendable {
         parseObjectEntriesWithToken(from: data).entries
     }
 
+    private func parseBucketLocation(from data: Data) -> String? {
+        let parser = BucketLocationParser()
+        let xml = XMLParser(data: data)
+        xml.delegate = parser
+        xml.parse()
+        return parser.location
+    }
+
     private func parseObjectEntriesWithToken(from data: Data) -> (entries: [S3Object], nextContinuationToken: String?, isTruncated: Bool) {
         let parser = ObjectListParser()
         let xml = XMLParser(data: data)
@@ -803,6 +954,71 @@ final class S3Service: NSObject, S3ServiceProtocol, @unchecked Sendable {
         components?.percentEncodedPath = "/" + safeBucket + "/" + safeKey
         components?.queryItems = nil
         return components?.url ?? endpoint
+    }
+
+    private func makeBucketURL(endpoint: URL, bucket: String) -> URL {
+        var components = URLComponents(url: endpoint, resolvingAgainstBaseURL: false)
+        let safeBucket = bucket.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? bucket
+        components?.percentEncodedPath = "/" + safeBucket
+        components?.queryItems = nil
+        return components?.url ?? endpoint
+    }
+
+    private func makeBucketVersioningURL(endpoint: URL, bucket: String) -> URL {
+        var components = URLComponents(url: endpoint, resolvingAgainstBaseURL: false)
+        let safeBucket = bucket.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? bucket
+        components?.percentEncodedPath = "/" + safeBucket
+        components?.percentEncodedQuery = "versioning"
+        return components?.url ?? endpoint
+    }
+
+    private func makeBucketLocationURL(endpoint: URL, bucket: String) -> URL {
+        var components = URLComponents(url: endpoint, resolvingAgainstBaseURL: false)
+        let safeBucket = bucket.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? bucket
+        components?.percentEncodedPath = "/" + safeBucket
+        components?.percentEncodedQuery = "location"
+        return components?.url ?? endpoint
+    }
+
+    private func putBucketVersioning(endpoint: URL, bucket: String, region: String, accessKey: String, secretKey: String, allowInsecure: Bool, profileName: String) async throws -> ConnectionResult {
+        let start = Date()
+        let requestURL = makeBucketVersioningURL(endpoint: endpoint, bucket: bucket)
+        var request = URLRequest(url: requestURL)
+        request.httpMethod = "PUT"
+        request.timeoutInterval = timeout
+        let xml = """
+        <VersioningConfiguration xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
+          <Status>Enabled</Status>
+        </VersioningConfiguration>
+        """
+        let bodyData = Data(xml.utf8)
+        request.httpBody = bodyData
+        request.setValue("application/xml", forHTTPHeaderField: "Content-Type")
+        signRequest(&request, region: region, accessKey: accessKey, secretKey: secretKey, payloadHash: sha256Hex(bodyData))
+
+        let session = makeSession(allowInsecure: allowInsecure)
+        let (data, response) = try await session.data(for: request)
+        let elapsed = Int(Date().timeIntervalSince(start) * 1000)
+        let http = response as? HTTPURLResponse
+        let text = String(data: data, encoding: .utf8)
+        let headerMap = (http?.allHeaderFields ?? [:]).reduce(into: [String: String]()) { partial, entry in
+            let key = String(describing: entry.key)
+            let value = String(describing: entry.value)
+            partial[key] = value
+        }
+        let requestSummary = makeRequestSummary(request: request)
+        Task { await metricsRecorder.record(category: .put, uploaded: Int64(bodyData.count), downloaded: Int64(data.count), profileName: profileName) }
+
+        return ConnectionResult(
+            statusCode: http?.statusCode,
+            responseText: text,
+            elapsedMs: elapsed,
+            bucketNames: [],
+            responseHeaders: headerMap,
+            requestSummary: requestSummary,
+            objectEntries: [],
+            objectInfo: nil
+        )
     }
 
     private func makeMultipartURL(endpoint: URL, bucket: String, key: String, queryItems: [URLQueryItem]) -> URL {
@@ -1320,6 +1536,27 @@ private final class BucketListParser: NSObject, XMLParserDelegate {
             insideBucket = false
         }
         currentElement = ""
+        currentText = ""
+    }
+}
+
+private final class BucketLocationParser: NSObject, XMLParserDelegate {
+    private(set) var location: String?
+    private var currentText: String = ""
+
+    func parser(_ parser: XMLParser, didStartElement elementName: String, namespaceURI: String?, qualifiedName qName: String?, attributes attributeDict: [String: String]) {
+        currentText = ""
+    }
+
+    func parser(_ parser: XMLParser, foundCharacters string: String) {
+        currentText += string
+    }
+
+    func parser(_ parser: XMLParser, didEndElement elementName: String, namespaceURI: String?, qualifiedName qName: String?) {
+        if elementName == "LocationConstraint" {
+            let trimmed = currentText.trimmingCharacters(in: .whitespacesAndNewlines)
+            location = trimmed
+        }
         currentText = ""
     }
 }

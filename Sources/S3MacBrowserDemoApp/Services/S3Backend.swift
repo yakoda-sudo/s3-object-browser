@@ -19,6 +19,56 @@ final class S3Backend: StorageBackend {
         )
     }
 
+    func getBucketLocation(endpoint: StorageEndpoint, bucket: String, region: String, accessKey: String, secretKey: String, allowInsecure: Bool, profileName: String) async throws -> (ConnectionResult, String?) {
+        try await service.getBucketLocation(
+            endpoint: endpoint.baseURL,
+            bucket: bucket,
+            region: region,
+            accessKey: accessKey,
+            secretKey: secretKey,
+            allowInsecure: allowInsecure,
+            profileName: profileName
+        )
+    }
+
+    func createBucket(endpoint: StorageEndpoint, bucket: String, region: String, accessKey: String, secretKey: String, allowInsecure: Bool, enableVersioning: Bool, enableObjectLock: Bool, profileName: String) async throws -> ConnectionResult {
+        try await service.createBucket(
+            endpoint: endpoint.baseURL,
+            bucket: bucket,
+            region: region,
+            accessKey: accessKey,
+            secretKey: secretKey,
+            allowInsecure: allowInsecure,
+            enableVersioning: enableVersioning,
+            enableObjectLock: enableObjectLock,
+            profileName: profileName
+        )
+    }
+
+    func createContainer(endpoint: StorageEndpoint, name: String, publicAccess: AzurePublicAccess, allowInsecure: Bool, profileName: String) async throws -> ConnectionResult {
+        throw NSError(domain: "S3Backend", code: -1, userInfo: [
+            NSLocalizedDescriptionKey: "Create container is only supported for Azure Blob."
+        ])
+    }
+
+    func deleteBucket(endpoint: StorageEndpoint, bucket: String, region: String, accessKey: String, secretKey: String, allowInsecure: Bool, profileName: String) async throws -> ConnectionResult {
+        try await service.deleteBucket(
+            endpoint: endpoint.baseURL,
+            bucket: bucket,
+            region: region,
+            accessKey: accessKey,
+            secretKey: secretKey,
+            allowInsecure: allowInsecure,
+            profileName: profileName
+        )
+    }
+
+    func deleteContainer(endpoint: StorageEndpoint, name: String, allowInsecure: Bool, profileName: String) async throws -> ConnectionResult {
+        throw NSError(domain: "S3Backend", code: -1, userInfo: [
+            NSLocalizedDescriptionKey: "Delete container is only supported for Azure Blob."
+        ])
+    }
+
     func testConnection(endpoint: StorageEndpoint, region: String, accessKey: String, secretKey: String, allowInsecure: Bool, profileName: String) async throws -> ConnectionResult {
         try await service.listBuckets(
             endpoint: endpoint.baseURL,

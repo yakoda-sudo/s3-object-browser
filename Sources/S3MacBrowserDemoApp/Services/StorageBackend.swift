@@ -5,6 +5,23 @@ enum StorageProvider: String, Codable {
     case azureBlob
 }
 
+enum AzurePublicAccess: String, Codable, CaseIterable {
+    case privateAccess = "private"
+    case blob = "blob"
+    case container = "container"
+
+    var headerValue: String? {
+        switch self {
+        case .privateAccess:
+            return nil
+        case .blob:
+            return "blob"
+        case .container:
+            return "container"
+        }
+    }
+}
+
 struct StorageEndpoint {
     let provider: StorageProvider
     let rawInput: String
@@ -139,6 +156,10 @@ protocol StorageBackend: Sendable {
     var provider: StorageProvider { get }
 
     func listBuckets(endpoint: StorageEndpoint, region: String, accessKey: String, secretKey: String, allowInsecure: Bool, profileName: String) async throws -> ConnectionResult
+    func createBucket(endpoint: StorageEndpoint, bucket: String, region: String, accessKey: String, secretKey: String, allowInsecure: Bool, enableVersioning: Bool, enableObjectLock: Bool, profileName: String) async throws -> ConnectionResult
+    func createContainer(endpoint: StorageEndpoint, name: String, publicAccess: AzurePublicAccess, allowInsecure: Bool, profileName: String) async throws -> ConnectionResult
+    func deleteBucket(endpoint: StorageEndpoint, bucket: String, region: String, accessKey: String, secretKey: String, allowInsecure: Bool, profileName: String) async throws -> ConnectionResult
+    func deleteContainer(endpoint: StorageEndpoint, name: String, allowInsecure: Bool, profileName: String) async throws -> ConnectionResult
     func testConnection(endpoint: StorageEndpoint, region: String, accessKey: String, secretKey: String, allowInsecure: Bool, profileName: String) async throws -> ConnectionResult
     func listObjects(endpoint: StorageEndpoint, bucket: String, prefix: String, continuationToken: String?, region: String, accessKey: String, secretKey: String, allowInsecure: Bool, profileName: String) async throws -> ConnectionResult
     func listObjectVersions(endpoint: StorageEndpoint, bucket: String, prefix: String, region: String, accessKey: String, secretKey: String, allowInsecure: Bool, profileName: String) async throws -> ConnectionResult

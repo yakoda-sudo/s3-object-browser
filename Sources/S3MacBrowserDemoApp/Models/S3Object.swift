@@ -9,6 +9,7 @@ struct S3Object: Identifiable, Hashable {
     let eTag: String
     let storageClass: String
     let blobType: String
+    var region: String
     let versionId: String?
     let isDeleteMarker: Bool
     let isDeleted: Bool
@@ -22,6 +23,7 @@ struct S3Object: Identifiable, Hashable {
          eTag: String,
          storageClass: String = "",
          blobType: String = "",
+         region: String = "",
          versionId: String? = nil,
          isDeleteMarker: Bool = false,
          isDeleted: Bool = false,
@@ -34,6 +36,7 @@ struct S3Object: Identifiable, Hashable {
         self.eTag = eTag
         self.storageClass = storageClass
         self.blobType = blobType
+        self.region = region
         self.versionId = versionId
         self.isDeleteMarker = isDeleteMarker
         self.isDeleted = isDeleted

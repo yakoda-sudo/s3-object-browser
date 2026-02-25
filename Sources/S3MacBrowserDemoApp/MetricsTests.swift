@@ -1,5 +1,5 @@
 import XCTest
-@testable import S3MacBrowserDemoApp
+@testable import S3MacBrowserCore
 
 final class MetricsTests: XCTestCase {
     func testHourBucketing() {

@@ -1,4 +1,5 @@
 import Foundation
+import CryptoKit
 
 final class AzureBlobBackend: StorageBackend {
     let provider: StorageProvider = .azureBlob
@@ -27,6 +28,81 @@ final class AzureBlobBackend: StorageBackend {
             )
         }
         return try await listContainers(endpoint: endpoint, allowInsecure: allowInsecure, profileName: profileName)
+    }
+
+    func createBucket(endpoint: StorageEndpoint, bucket: String, region: String, accessKey: String, secretKey: String, allowInsecure: Bool, enableVersioning: Bool, enableObjectLock: Bool, profileName: String) async throws -> ConnectionResult {
+        throw NSError(domain: "AzureBlobBackend", code: -1, userInfo: [
+            NSLocalizedDescriptionKey: "Create bucket is not supported for Azure Blob."
+        ])
+    }
+
+    func createContainer(endpoint: StorageEndpoint, name: String, publicAccess: AzurePublicAccess, allowInsecure: Bool, profileName: String) async throws -> ConnectionResult {
+        let requestURL = endpoint.azureURL(container: name, blobPath: nil, queryItems: [
+            URLQueryItem(name: "restype", value: "container")
+        ])
+        var request = URLRequest(url: requestURL)
+        request.httpMethod = "PUT"
+        request.timeoutInterval = timeout
+        request.setValue(azureApiVersion, forHTTPHeaderField: "x-ms-version")
+        if let access = publicAccess.headerValue {
+            request.setValue(access, forHTTPHeaderField: "x-ms-blob-public-access")
+        }
+
+        let session = makeSession(allowInsecure: allowInsecure)
+        let start = Date()
+        let (data, response) = try await session.data(for: request)
+        let elapsed = Int(Date().timeIntervalSince(start) * 1000)
+        let http = response as? HTTPURLResponse
+        let headerMap = headersMap(from: http)
+        let requestSummary = makeRequestSummary(request: request, endpoint: endpoint)
+        await metricsRecorder.record(category: .put, uploaded: 0, downloaded: Int64(data.count), profileName: profileName)
+
+        return ConnectionResult(
+            statusCode: http?.statusCode,
+            responseText: String(data: data, encoding: .utf8),
+            elapsedMs: elapsed,
+            bucketNames: [],
+            responseHeaders: headerMap,
+            requestSummary: requestSummary,
+            objectEntries: [],
+            objectInfo: nil
+        )
+    }
+
+    func deleteBucket(endpoint: StorageEndpoint, bucket: String, region: String, accessKey: String, secretKey: String, allowInsecure: Bool, profileName: String) async throws -> ConnectionResult {
+        throw NSError(domain: "AzureBlobBackend", code: -1, userInfo: [
+            NSLocalizedDescriptionKey: "Delete bucket is not supported for Azure Blob."
+        ])
+    }
+
+    func deleteContainer(endpoint: StorageEndpoint, name: String, allowInsecure: Bool, profileName: String) async throws -> ConnectionResult {
+        let requestURL = endpoint.azureURL(container: name, blobPath: nil, queryItems: [
+            URLQueryItem(name: "restype", value: "container")
+        ])
+        var request = URLRequest(url: requestURL)
+        request.httpMethod = "DELETE"
+        request.timeoutInterval = timeout
+        request.setValue(azureApiVersion, forHTTPHeaderField: "x-ms-version")
+
+        let session = makeSession(allowInsecure: allowInsecure)
+        let start = Date()
+        let (data, response) = try await session.data(for: request)
+        let elapsed = Int(Date().timeIntervalSince(start) * 1000)
+        let http = response as? HTTPURLResponse
+        let headerMap = headersMap(from: http)
+        let requestSummary = makeRequestSummary(request: request, endpoint: endpoint)
+        await metricsRecorder.record(category: .delete, uploaded: 0, downloaded: Int64(data.count), profileName: profileName)
+
+        return ConnectionResult(
+            statusCode: http?.statusCode,
+            responseText: String(data: data, encoding: .utf8),
+            elapsedMs: elapsed,
+            bucketNames: [],
+            responseHeaders: headerMap,
+            requestSummary: requestSummary,
+            objectEntries: [],
+            objectInfo: nil
+        )
     }
 
     func testConnection(endpoint: StorageEndpoint, region: String, accessKey: String, secretKey: String, allowInsecure: Bool, profileName: String) async throws -> ConnectionResult {
@@ -277,8 +353,87 @@ final class AzureBlobBackend: StorageBackend {
 
     func shareLink(endpoint: StorageEndpoint, bucket: String, key: String, region: String, accessKey: String, secretKey: String, expiresHours: Int) -> String? {
         let container = endpoint.container ?? bucket
-        let url = endpoint.azureURL(container: container, blobPath: key)
-        return url.absoluteString
+        guard !container.isEmpty, !key.isEmpty else { return nil }
+        guard let accountName = endpoint.baseURL.host?.split(separator: ".").first.map(String.init),
+              !accountName.isEmpty else { return nil }
+        let clampedHours = min(max(expiresHours, 1), 168)
+        if let sasToken = buildBlobSAS(accountName: accountName,
+                                       accountKey: secretKey,
+                                       container: container,
+                                       blobPath: key,
+                                       expiresHours: clampedHours) {
+            var components = URLComponents(url: endpoint.baseURL, resolvingAgainstBaseURL: false)
+            components?.path = "/" + [container, key].joined(separator: "/")
+            components?.percentEncodedQuery = sasToken
+            return components?.url?.absoluteString
+        }
+        if let token = endpoint.sasToken, !token.isEmpty {
+            let fallbackURL = endpoint.azureURL(container: container, blobPath: key)
+            return fallbackURL.absoluteString
+        }
+        return nil
+    }
+
+    private func buildBlobSAS(accountName: String, accountKey: String, container: String, blobPath: String, expiresHours: Int) -> String? {
+        let trimmedKey = accountKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let keyData = Data(base64Encoded: trimmedKey),
+              keyData.count == 32 else { return nil }
+        let expiry = iso8601UTC(Date().addingTimeInterval(TimeInterval(expiresHours) * 3600))
+        let permissions = "r"
+        let protocolValue = "https"
+        let version = "2020-10-02"
+        let canonicalizedResource = "/blob/\(accountName)/\(container)/\(blobPath)"
+        let stringToSign = [
+            permissions,
+            "",
+            expiry,
+            canonicalizedResource,
+            "",
+            "",
+            protocolValue,
+            version,
+            "b",
+            "",
+            "",
+            "",
+            "",
+            "",
+            ""
+        ].joined(separator: "\n")
+        let signature = hmacSHA256Base64(key: keyData, message: stringToSign)
+        let pairs = [
+            ("sv", version),
+            ("spr", protocolValue),
+            ("se", expiry),
+            ("sr", "b"),
+            ("sp", permissions),
+            ("sig", signature)
+        ]
+        return pairs.map { "\($0.0)=\(azureEncode($0.1))" }.joined(separator: "&")
+    }
+
+    private func hmacSHA256Base64(key: Data, message: String) -> String {
+        let signature = HMAC<SHA256>.authenticationCode(for: Data(message.utf8), using: SymmetricKey(data: key))
+        return Data(signature).base64EncodedString()
+    }
+
+    private func iso8601UTC(_ date: Date) -> String {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime]
+        formatter.timeZone = TimeZone(secondsFromGMT: 0)
+        return formatter.string(from: date)
+    }
+
+    private func azureEncode(_ string: String) -> String {
+        let unreserved = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~"
+        let allowed = CharacterSet(charactersIn: unreserved)
+        return string.utf8.map { byte in
+            let scalar = UnicodeScalar(Int(byte))
+            if let scalar, allowed.contains(scalar) {
+                return String(scalar)
+            }
+            return String(format: "%%%02X", byte)
+        }.joined()
     }
 
     func listContainers(endpoint: StorageEndpoint, allowInsecure: Bool, profileName: String) async throws -> ConnectionResult {

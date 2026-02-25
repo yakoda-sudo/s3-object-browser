@@ -45,6 +45,25 @@ struct ConnectionView: View {
     @State private var lastTransferTotalWidth: CGFloat = 0
     @State private var lastInspectorLeftWidth: CGFloat = 0
     @State private var lastInspectorTotalWidth: CGFloat = 0
+    @AppStorage("ui.maxConfigPanelWidth") private var maxConfigPanelWidthStored: Double = 0
+    @AppStorage("ui.maxInspectorPanelWidth") private var maxInspectorPanelWidthStored: Double = 0
+    @State private var inspectorTab: Int = 0
+    @State private var showCreateBucketWizard = false
+    @State private var createBucketName = ""
+    @State private var createBucketRegion = ""
+    @State private var createBucketVersioning = true
+    @State private var createBucketObjectLock = false
+    @State private var createBucketError: AlertPayload?
+    @State private var toastMessage: String?
+    @State private var isCreatingBucket = false
+    @State private var showCreateContainerWizard = false
+    @State private var createContainerName = ""
+    @State private var createContainerAccess: AzurePublicAccess = .privateAccess
+    @State private var createContainerError: AlertPayload?
+    @State private var isCreatingContainer = false
+    @State private var showDeleteContainerConfirm = false
+    @State private var deleteContainerName = ""
+    @State private var deleteContainerError: AlertPayload?
 
     init(viewModel: ConnectionViewModel = ConnectionViewModel()) {
         self.viewModel = viewModel
@@ -52,42 +71,39 @@ struct ConnectionView: View {
 
     var body: some View {
         GeometryReader { proxy in
-            HSplitView {
+            let totalWidth = max(proxy.size.width, 1)
+            let minLeft: CGFloat = 320
+            let minRight: CGFloat = 420
+            let preferredLeft = totalWidth * CGFloat(mainSplitRatio)
+            let maxConfigPanelWidth = maxConfigPanelWidthStored > 0 ? CGFloat(maxConfigPanelWidthStored) : nil
+            let cappedLeft = min(preferredLeft, maxConfigPanelWidth ?? preferredLeft)
+            let leftWidth = min(max(minLeft, cappedLeft), max(minLeft, totalWidth - minRight))
+            let rightWidth = max(minRight, totalWidth - leftWidth)
+
+            HStack(spacing: 0) {
                 configPanel
-                    .frame(
-                        minWidth: 320,
-                        maxWidth: max(320, proxy.size.width * CGFloat(mainSplitRatio))
-                    )
-                    .background(GeometryReader { inner in
-                        Color.clear
-                            .onAppear { updateMainSplit(leftWidth: inner.size.width, totalWidth: proxy.size.width) }
-                            .onChange(of: inner.size.width) { newValue in
-                                updateMainSplit(leftWidth: newValue, totalWidth: proxy.size.width)
-                            }
-                    })
+                    .frame(width: leftWidth)
                     .overlay(alignment: .trailing) {
                         Rectangle()
                             .fill(Color(NSColor.separatorColor))
                             .frame(width: 1)
                     }
                 content
+                    .frame(width: rightWidth)
                     .overlay(alignment: .leading) {
                         Rectangle()
                             .fill(Color(NSColor.separatorColor))
                             .frame(width: 1)
                     }
             }
-            .overlay(alignment: .bottomLeading) {
-                Button {
-                    saveLayoutSnapshot()
-                } label: {
-                    Label(layoutSaved ? language.t("layout.saved") : language.t("layout.save"), systemImage: layoutSaved ? "lock.fill" : "lock.open")
+            .background(
+                Color.clear.onAppear {
+                    if maxConfigPanelWidthStored <= 0 {
+                        let capped = min(max(minLeft, preferredLeft), max(minLeft, totalWidth - minRight))
+                        maxConfigPanelWidthStored = Double(capped)
+                    }
                 }
-                .buttonStyle(.borderedProminent)
-                .controlSize(.small)
-                .disabled(layoutSaved)
-                .padding([.leading, .bottom], 12)
-            }
+            )
         }
         .frame(minWidth: 1100, minHeight: 700)
         .alert(item: $presignedAlert) { payload in
@@ -100,6 +116,35 @@ struct ConnectionView: View {
                 },
                 secondaryButton: .cancel(Text(language.t("button.cancel")))
             )
+        }
+        .alert(item: $createBucketError) { payload in
+            Alert(
+                title: Text(payload.title),
+                message: Text(payload.message),
+                dismissButton: .default(Text(language.t("button.ok")))
+            )
+        }
+        .alert(item: $createContainerError) { payload in
+            Alert(
+                title: Text(payload.title),
+                message: Text(payload.message),
+                dismissButton: .default(Text(language.t("button.ok")))
+            )
+        }
+        .alert(item: $deleteContainerError) { payload in
+            Alert(
+                title: Text(payload.title),
+                message: Text(payload.message),
+                dismissButton: .default(Text(language.t("button.ok")))
+            )
+        }
+        .alert(language.t("alert.confirmDeletionTitle"), isPresented: $showDeleteContainerConfirm) {
+            Button(language.t("button.cancel"), role: .cancel) {}
+            Button(language.t("button.delete"), role: .destructive) {
+                Task { await submitDeleteContainer() }
+            }
+        } message: {
+            Text(String(format: language.t("alert.confirmDeletionBody"), safeFormatArg(deleteContainerName)))
         }
         .alert(language.t("alert.undeleteTitle"), isPresented: $showUndeleteConfirm) {
             Button(language.t("button.cancel"), role: .cancel) {}
@@ -115,6 +160,26 @@ struct ConnectionView: View {
             TransferStatusWindow()
                 .environmentObject(viewModel)
                 .environmentObject(language)
+        }
+        .sheet(isPresented: $showCreateBucketWizard) {
+            createBucketSheet
+                .environmentObject(language)
+        }
+        .sheet(isPresented: $showCreateContainerWizard) {
+            createContainerSheet
+                .environmentObject(language)
+        }
+        .overlay(alignment: .bottomTrailing) {
+            if let message = toastMessage {
+                Text(message)
+                    .font(.caption)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 8)
+                    .background(Color(NSColor.controlBackgroundColor))
+                    .cornerRadius(8)
+                    .shadow(radius: 3)
+                    .padding(12)
+            }
         }
         .onAppear {
             accessKeyField = viewModel.accessKey
@@ -253,32 +318,41 @@ struct ConnectionView: View {
             breadcrumbBar
             Divider()
             GeometryReader { proxy in
-                HSplitView {
+                let totalWidth = max(proxy.size.width, 1)
+                let minLeft: CGFloat = 520
+                let minRight: CGFloat = 320
+                let preferredLeft = totalWidth * CGFloat(inspectorSplitRatio)
+                let preferredRight = totalWidth - preferredLeft
+                let maxRightDefault = min(420, totalWidth * 0.35)
+                let maxInspectorPanelWidth = maxInspectorPanelWidthStored > 0 ? CGFloat(maxInspectorPanelWidthStored) : nil
+                let maxRight = maxInspectorPanelWidth ?? maxRightDefault
+                let cappedRight = min(preferredRight, maxRight)
+                let rightWidth = min(max(minRight, cappedRight), max(minRight, totalWidth - minLeft))
+                let leftWidth = max(minLeft, totalWidth - rightWidth)
+
+                HStack(spacing: 0) {
                     mainListPanel
-                        .frame(
-                            minWidth: 420,
-                            maxWidth: max(420, proxy.size.width * CGFloat(inspectorSplitRatio))
-                        )
-                        .background(GeometryReader { inner in
-                            Color.clear
-                                .onAppear { updateInspectorSplit(leftWidth: inner.size.width, totalWidth: proxy.size.width) }
-                                .onChange(of: inner.size.width) { newValue in
-                                    updateInspectorSplit(leftWidth: newValue, totalWidth: proxy.size.width)
-                                }
-                        })
+                        .frame(width: leftWidth)
                         .overlay(alignment: .trailing) {
                             Rectangle()
                                 .fill(Color(NSColor.separatorColor))
                                 .frame(width: 1)
                         }
                     inspectorPanel
-                        .frame(minWidth: 260, maxWidth: .infinity)
+                        .frame(width: rightWidth)
                         .overlay(alignment: .leading) {
                             Rectangle()
                                 .fill(Color(NSColor.separatorColor))
                                 .frame(width: 1)
                         }
                 }
+                .background(
+                    Color.clear.onAppear {
+                        if maxInspectorPanelWidthStored <= 0 {
+                            maxInspectorPanelWidthStored = Double(maxRightDefault)
+                        }
+                    }
+                )
             }
         }
     }
@@ -295,6 +369,25 @@ struct ConnectionView: View {
                 handleDrop(providers)
                 return true
             }
+            .contextMenu {
+                if viewModel.currentBucket == nil {
+                    if viewModel.provider == .s3 {
+                        Button(language.t("menu.createBucket")) {
+                            createBucketName = ""
+                            createBucketRegion = viewModel.region
+                            createBucketVersioning = true
+                            createBucketObjectLock = false
+                            showCreateBucketWizard = true
+                        }
+                    } else if viewModel.canCreateContainer() {
+                        Button(language.t("menu.createContainer")) {
+                            createContainerName = ""
+                            createContainerAccess = .privateAccess
+                            showCreateContainerWizard = true
+                        }
+                    }
+                }
+            }
             if isDropTargeted && canDropInList {
                 RoundedRectangle(cornerRadius: 8)
                     .stroke(Color.accentColor, style: StrokeStyle(lineWidth: 2, dash: [6]))
@@ -304,15 +397,21 @@ struct ConnectionView: View {
     }
 
     private var objectListHeader: some View {
-        HStack(spacing: 12) {
+        let showRegionColumn = viewModel.provider == .s3 && viewModel.currentBucket == nil
+        return HStack(spacing: 12) {
             Text(language.t("label.name"))
                 .frame(maxWidth: .infinity, alignment: .leading)
             Text(language.t("label.size"))
                 .frame(width: 90, alignment: .trailing)
             Text(language.t("label.lastModified"))
                 .frame(width: 140, alignment: .trailing)
-            Text(language.t("label.storageClass"))
-                .frame(width: 120, alignment: .trailing)
+            if showRegionColumn {
+                Text(language.t("label.region"))
+                    .frame(width: 140, alignment: .trailing)
+            } else {
+                Text(language.t("label.storageClass"))
+                    .frame(width: 120, alignment: .trailing)
+            }
             if viewModel.provider == .azureBlob {
                 Text(language.t("label.blobType"))
                     .frame(width: 110, alignment: .trailing)
@@ -374,6 +473,7 @@ struct ConnectionView: View {
     private var objectList: some View {
         List(displayRows, selection: $selection) { row in
             let object = row.object
+            let showRegionColumn = viewModel.provider == .s3 && viewModel.currentBucket == nil
             HStack {
                 Image(systemName: iconName(for: object))
                 VStack(alignment: .leading) {
@@ -396,10 +496,17 @@ struct ConnectionView: View {
                     .foregroundColor(.secondary)
                     .font(row.isChild ? .caption2 : .caption)
                     .frame(width: 140, alignment: .trailing)
-                Text(displayStorageClass(for: object))
-                    .foregroundColor(.secondary)
-                    .font(row.isChild ? .caption2 : .caption)
-                    .frame(width: 120, alignment: .trailing)
+                if showRegionColumn {
+                    Text(displayRegion(for: object))
+                        .foregroundColor(.secondary)
+                        .font(row.isChild ? .caption2 : .caption)
+                        .frame(width: 140, alignment: .trailing)
+                } else {
+                    Text(displayStorageClass(for: object))
+                        .foregroundColor(.secondary)
+                        .font(row.isChild ? .caption2 : .caption)
+                        .frame(width: 120, alignment: .trailing)
+                }
                 if viewModel.provider == .azureBlob {
                     Text(displayBlobType(for: object))
                         .foregroundColor(.secondary)
@@ -431,6 +538,12 @@ struct ConnectionView: View {
                             viewModel.deleteObjects(selectedTargets(for: object))
                         }
                     }
+                    if let uri = viewModel.copyURI(for: object) {
+                        Button(language.t("menu.copyURI")) {
+                            NSPasteboard.general.clearContents()
+                            NSPasteboard.general.setString(uri, forType: .string)
+                        }
+                    }
                 } else if viewModel.provider == .azureBlob && (object.isVersioned || object.isDeleted) {
                     if object.isDeleted {
                         Button(language.t("menu.undelete")) {
@@ -456,18 +569,26 @@ struct ConnectionView: View {
                     if !isBucket && !isFolder {
                         if viewModel.provider == .azureBlob {
                             Button(language.t("menu.shareLink")) {
-                                if let url = viewModel.shareLink(for: object, expiresHours: clampedPresignHours) {
-                                    presignedAlert = AlertPayload(title: language.t("menu.shareLink"), message: url)
-                                } else {
-                                    presignedAlert = AlertPayload(title: language.t("menu.shareLink"), message: language.t("menu.shareLinkHelp"))
+                                Task {
+                                    if let url = await viewModel.shareLink(for: object, expiresHours: clampedPresignHours) {
+                                        NSPasteboard.general.clearContents()
+                                        NSPasteboard.general.setString(url, forType: .string)
+                                        presentToast(language.t("toast.azureSasCopied"))
+                                    } else {
+                                        presignedAlert = AlertPayload(title: language.t("menu.shareLink"), message: language.t("error.shareLinkFailed"))
+                                    }
                                 }
                             }
                         } else {
                             Button(String(format: language.t("menu.presignedURLHours"), clampedPresignHours)) {
-                                if let url = viewModel.shareLink(for: object, expiresHours: clampedPresignHours) {
-                                    presignedAlert = AlertPayload(title: language.t("menu.presignedURL"), message: url)
-                                } else {
-                                    presignedAlert = AlertPayload(title: language.t("menu.presignedURL"), message: language.t("menu.presignedURLHelp"))
+                                Task {
+                                    if let url = await viewModel.shareLink(for: object, expiresHours: clampedPresignHours) {
+                                        NSPasteboard.general.clearContents()
+                                        NSPasteboard.general.setString(url, forType: .string)
+                                        presentToast(language.t("toast.presignedCopied"))
+                                    } else {
+                                        presignedAlert = AlertPayload(title: language.t("menu.presignedURL"), message: language.t("menu.presignedURLHelp"))
+                                    }
                                 }
                             }
                         }
@@ -475,8 +596,21 @@ struct ConnectionView: View {
                     Button(language.t("menu.download")) {
                         viewModel.downloadObjects(selectedTargets(for: object))
                     }
-                    Button(language.t("menu.delete")) {
-                        viewModel.deleteObjects(selectedTargets(for: object))
+                    if let uri = viewModel.copyURI(for: object) {
+                        Button(language.t("menu.copyURI")) {
+                            NSPasteboard.general.clearContents()
+                            NSPasteboard.general.setString(uri, forType: .string)
+                        }
+                    }
+                    if isBucket {
+                        Button(language.t("menu.delete")) {
+                            deleteContainerName = object.key
+                            showDeleteContainerConfirm = true
+                        }
+                    } else {
+                        Button(language.t("menu.delete")) {
+                            viewModel.deleteObjects(selectedTargets(for: object))
+                        }
                     }
                 }
             }
@@ -553,17 +687,23 @@ struct ConnectionView: View {
     }
 
     private var inspectorPanel: some View {
-        TabView {
-            propertyPanel
-                .tabItem {
-                    Text(language.t("section.objectProperties"))
-                }
-            activityPanel
-                .tabItem {
-                    Text(language.t("section.debugResponse"))
-                }
+        VStack(spacing: 8) {
+            Picker("", selection: $inspectorTab) {
+                Text(language.t("section.objectProperties")).tag(0)
+                Text(language.t("section.debugResponse")).tag(1)
+            }
+            .pickerStyle(.segmented)
+            .padding(.horizontal, 8)
+            .padding(.top, 6)
+
+            Divider()
+
+            if inspectorTab == 0 {
+                propertyPanel
+            } else {
+                activityPanel
+            }
         }
-        .padding(.top, 6)
         .background(Color(NSColor.controlBackgroundColor))
     }
 
@@ -614,6 +754,14 @@ struct ConnectionView: View {
     private func displayStorageClass(for object: S3Object) -> String {
         let trimmed = object.storageClass.trimmingCharacters(in: .whitespacesAndNewlines)
         if trimmed.isEmpty || object.key.hasSuffix("/") || object.contentType == "bucket" {
+            return "—"
+        }
+        return trimmed
+    }
+
+    private func displayRegion(for object: S3Object) -> String {
+        let trimmed = object.region.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.isEmpty || object.key.hasSuffix("/") || object.contentType != "bucket" {
             return "—"
         }
         return trimmed
@@ -672,6 +820,221 @@ struct ConnectionView: View {
             showTransferStatus = true
             viewModel.uploadFiles(urls)
         }
+    }
+
+    private var createBucketSheet: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text(language.t("title.createBucket"))
+                .font(.headline)
+
+            VStack(alignment: .leading, spacing: 6) {
+                Text(language.t("field.bucketName"))
+                TextField("", text: $createBucketName)
+                    .textFieldStyle(.roundedBorder)
+                if let validation = bucketNameValidationMessage(createBucketName) {
+                    Text(validation)
+                        .font(.caption)
+                        .foregroundColor(.red)
+                }
+            }
+
+            VStack(alignment: .leading, spacing: 6) {
+                Text(language.t("field.region"))
+                TextField("", text: $createBucketRegion)
+                    .textFieldStyle(.roundedBorder)
+                Text(language.t("help.regionRequirement"))
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
+
+            Toggle(language.t("field.versioning"), isOn: $createBucketVersioning)
+            VStack(alignment: .leading, spacing: 4) {
+                Toggle(language.t("field.objectLock"), isOn: $createBucketObjectLock)
+                Text(language.t("help.objectLockNote"))
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
+
+            Spacer()
+
+            HStack {
+                Spacer()
+                Button(language.t("button.cancel")) {
+                    showCreateBucketWizard = false
+                }
+                Button(language.t("button.createBucket")) {
+                    Task { await submitCreateBucket() }
+                }
+                .disabled(bucketNameValidationMessage(createBucketName) != nil || isCreatingBucket)
+            }
+        }
+        .padding(20)
+        .frame(width: 420)
+        .onAppear {
+            if createBucketRegion.isEmpty {
+                createBucketRegion = viewModel.region
+            }
+        }
+    }
+
+    private var createContainerSheet: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text(language.t("title.createContainer"))
+                .font(.headline)
+
+            VStack(alignment: .leading, spacing: 6) {
+                Text(language.t("field.containerName"))
+                TextField("", text: $createContainerName)
+                    .textFieldStyle(.roundedBorder)
+                if let validation = containerNameValidationMessage(createContainerName) {
+                    Text(validation)
+                        .font(.caption)
+                        .foregroundColor(.red)
+                }
+            }
+
+            VStack(alignment: .leading, spacing: 6) {
+                Text(language.t("field.publicAccess"))
+                Picker("", selection: $createContainerAccess) {
+                    Text(language.t("publicAccess.private")).tag(AzurePublicAccess.privateAccess)
+                    Text(language.t("publicAccess.blob")).tag(AzurePublicAccess.blob)
+                    Text(language.t("publicAccess.container")).tag(AzurePublicAccess.container)
+                }
+                .pickerStyle(.menu)
+            }
+
+            Spacer()
+
+            HStack {
+                Spacer()
+                Button(language.t("button.cancel")) {
+                    showCreateContainerWizard = false
+                }
+                Button(language.t("button.create")) {
+                    Task { await submitCreateContainer() }
+                }
+                .disabled(containerNameValidationMessage(createContainerName) != nil || isCreatingContainer)
+            }
+        }
+        .padding(20)
+        .frame(width: 420)
+    }
+
+    private func submitCreateBucket() async {
+        let trimmedName = createBucketName.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let validation = bucketNameValidationMessage(trimmedName) {
+            createBucketError = AlertPayload(title: language.t("alert.createBucketFailedTitle"), message: validation)
+            return
+        }
+
+        isCreatingBucket = true
+        defer { isCreatingBucket = false }
+
+        do {
+            let result = try await viewModel.createBucket(
+                name: trimmedName,
+                region: createBucketRegion,
+                enableVersioning: createBucketVersioning,
+                enableObjectLock: createBucketObjectLock
+            )
+            if let status = result.statusCode, status >= 400 {
+                let message = (result.responseText?.trimmingCharacters(in: .whitespacesAndNewlines)).flatMap { $0.isEmpty ? nil : $0 } ?? "HTTP \(status)"
+                createBucketError = AlertPayload(title: language.t("alert.createBucketFailedTitle"), message: message)
+                return
+            }
+            showCreateBucketWizard = false
+            presentToast(String(format: language.t("toast.bucketCreated"), safeFormatArg(trimmedName)))
+            viewModel.refreshCurrentView()
+        } catch {
+            createBucketError = AlertPayload(title: language.t("alert.createBucketFailedTitle"), message: error.localizedDescription)
+        }
+    }
+
+    private func submitCreateContainer() async {
+        let trimmedName = createContainerName.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let validation = containerNameValidationMessage(trimmedName) {
+            createContainerError = AlertPayload(title: language.t("alert.createContainerFailedTitle"), message: validation)
+            return
+        }
+
+        isCreatingContainer = true
+        defer { isCreatingContainer = false }
+
+        do {
+            let result = try await viewModel.createContainer(name: trimmedName, publicAccess: createContainerAccess)
+            if let status = result.statusCode, status >= 400 {
+                let message = (result.responseText?.trimmingCharacters(in: .whitespacesAndNewlines)).flatMap { $0.isEmpty ? nil : $0 } ?? "HTTP \(status)"
+                createContainerError = AlertPayload(title: language.t("alert.createContainerFailedTitle"), message: message)
+                return
+            }
+            showCreateContainerWizard = false
+            presentToast(String(format: language.t("toast.containerCreated"), safeFormatArg(trimmedName)))
+            viewModel.refreshCurrentView()
+        } catch {
+            createContainerError = AlertPayload(title: language.t("alert.createContainerFailedTitle"), message: error.localizedDescription)
+        }
+    }
+
+    private func submitDeleteContainer() async {
+        let name = deleteContainerName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !name.isEmpty else { return }
+        do {
+            let result = try await viewModel.deleteBucketOrContainer(name: name)
+            if let status = result.statusCode, status >= 400 {
+                let message = viewModel.localizedDeleteError(
+                    provider: viewModel.provider,
+                    responseText: result.responseText,
+                    statusCode: result.statusCode
+                ) ?? (result.responseText?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "HTTP \(status)")
+                deleteContainerError = AlertPayload(title: language.t("alert.deleteFailedTitle"), message: message)
+                return
+            }
+            presentToast(String(format: language.t("toast.resourceDeleted"), safeFormatArg(name)))
+            viewModel.refreshCurrentView()
+        } catch {
+            deleteContainerError = AlertPayload(title: language.t("alert.deleteFailedTitle"), message: error.localizedDescription)
+        }
+    }
+
+    private func safeFormatArg(_ value: String) -> String {
+        value.replacingOccurrences(of: "%", with: "%%")
+    }
+
+    private func presentToast(_ message: String) {
+        toastMessage = message
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
+            if toastMessage == message {
+                toastMessage = nil
+            }
+        }
+    }
+
+    private func bucketNameValidationMessage(_ value: String) -> String? {
+        let name = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !name.isEmpty else { return language.t("error.invalidBucketName") }
+        if name.count < 3 || name.count > 63 { return language.t("error.invalidBucketName") }
+        if name.hasPrefix(".") || name.hasSuffix(".") || name.hasPrefix("-") || name.hasSuffix("-") {
+            return language.t("error.invalidBucketName")
+        }
+        if name.contains("..") { return language.t("error.invalidBucketName") }
+        if name.range(of: "^[a-z0-9][a-z0-9.-]*[a-z0-9]$", options: .regularExpression) == nil {
+            return language.t("error.invalidBucketName")
+        }
+        if name.range(of: "^\\d+\\.\\d+\\.\\d+\\.\\d+$", options: .regularExpression) != nil {
+            return language.t("error.invalidBucketName")
+        }
+        return nil
+    }
+
+    private func containerNameValidationMessage(_ value: String) -> String? {
+        let name = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !name.isEmpty else { return language.t("error.invalidContainerName") }
+        if name.count < 3 || name.count > 63 { return language.t("error.invalidContainerName") }
+        if name.hasPrefix("-") || name.hasSuffix("-") { return language.t("error.invalidContainerName") }
+        if name.range(of: "^[a-z0-9][a-z0-9-]*[a-z0-9]$", options: .regularExpression) == nil {
+            return language.t("error.invalidContainerName")
+        }
+        return nil
     }
 
     private func handleSingleClick(_ object: S3Object) {
@@ -912,7 +1275,9 @@ struct ConnectionView: View {
             "ui.savedMainSplitRatio",
             "ui.mainSplitWidth",
             "ui.savedInspectorSplitRatio",
-            "ui.inspectorSplitLeftWidth"
+            "ui.inspectorSplitLeftWidth",
+            "ui.maxConfigPanelWidth",
+            "ui.maxInspectorPanelWidth"
         ]
         keys.forEach { defaults.removeObject(forKey: $0) }
 
@@ -921,6 +1286,8 @@ struct ConnectionView: View {
         layoutSaved = false
         didRestoreMainSplit = false
         didRestoreInspectorSplit = false
+        maxConfigPanelWidthStored = 0
+        maxInspectorPanelWidthStored = 0
     }
 
     private func restoreSavedLayoutDefaults() {

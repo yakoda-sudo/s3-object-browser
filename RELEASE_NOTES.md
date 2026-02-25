@@ -1,5 +1,15 @@
 # Release Notes
 
+## 1.0.1 — 2026-02-09
+
+### Added
+- Create Bucket wizard (S3/S3-compatible) with versioning + object lock options.
+- Create Container wizard (Azure) with public access selection.
+- Copy URI context menu for S3 and Azure objects.
+
+### Changed
+- Azure “Copy URI” now uses HTTPS blob URL format (no SAS).
+
 ## 0.9.2 — 2026-02-05
 - File list now shows columns for Name, Size, Last Modified, Storage Class, plus Blob Type for Azure.
 - Azure AccessTier maps to the Storage Class column.

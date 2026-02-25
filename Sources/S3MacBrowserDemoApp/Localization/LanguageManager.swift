@@ -70,12 +70,22 @@ final class LanguageManager: ObservableObject {
 
     private func bundleCandidates() -> [Bundle] {
         var bundles: [Bundle] = [Bundle.module, Bundle.main]
-        if let directURL = Bundle.main.url(forResource: "s3-mac-browser_S3MacBrowserDemoApp", withExtension: "bundle"),
-           let bundle = Bundle(url: directURL) {
-            bundles.append(bundle)
-        } else if let resourcesURL = Bundle.main.resourceURL,
-                  let contents = try? FileManager.default.contentsOfDirectory(at: resourcesURL, includingPropertiesForKeys: nil) {
-            for url in contents where url.pathExtension == "bundle" && url.lastPathComponent.contains("S3MacBrowserDemoApp") {
+        let bundleNames = [
+            "s3-mac-browser_S3MacBrowserCore",
+            "s3-mac-browser_S3MacBrowserDemoApp"
+        ]
+        for name in bundleNames {
+            if let directURL = Bundle.main.url(forResource: name, withExtension: "bundle"),
+               let bundle = Bundle(url: directURL) {
+                bundles.append(bundle)
+            }
+        }
+        if let resourcesURL = Bundle.main.resourceURL,
+           let contents = try? FileManager.default.contentsOfDirectory(at: resourcesURL, includingPropertiesForKeys: nil) {
+            for url in contents
+                where url.pathExtension == "bundle"
+                    && (url.lastPathComponent.contains("S3MacBrowserCore")
+                        || url.lastPathComponent.contains("S3MacBrowserDemoApp")) {
                 if let bundle = Bundle(url: url) {
                     bundles.append(bundle)
                 }

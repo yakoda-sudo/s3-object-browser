@@ -1,10 +1,9 @@
 import SwiftUI
 import AppKit
 
-@main
-struct S3MacBrowserDemoApp: App {
+public struct S3MacBrowserScene: Scene {
     @AppStorage("presignExpiryHours") private var presignExpiryHours: Int = 4
-    private let appVersion = "0.9.2"
+    private let appVersion = "1.0.1"
     @StateObject private var viewModel = ConnectionViewModel()
     @StateObject private var migrationSettings = MigrationSettings()
     @StateObject private var languageManager = LanguageManager()
@@ -13,11 +12,11 @@ struct S3MacBrowserDemoApp: App {
     @State private var showMigrationSettings = false
     @State private var showUploadParameters = false
 
-    init() {
+    public init() {
         NSApplication.shared.setActivationPolicy(.regular)
     }
 
-    var body: some Scene {
+    public var body: some Scene {
         WindowGroup {
             ConnectionView(viewModel: viewModel)
                 .environmentObject(languageManager)
