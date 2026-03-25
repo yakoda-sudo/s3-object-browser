@@ -1,0 +1,358 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <meta name="description" content="S3 Object Browser: Object client for S3 and S3-compatible storage with fast browsing, metadata inspection, migration, and metrics." />
+  <title>S3 Object Browser</title>
+  <style>
+    @import url("https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=Fraunces:opsz,wght@9..144,600;9..144,700&display=swap");
+
+    :root {
+      --bg: #f7f4ef;
+      --bg-deep: #efe8dd;
+      --ink: #111214;
+      --muted: #4b4f55;
+      --accent: #1b8f7a;
+      --accent-2: #ee7a4f;
+      --card: #ffffff;
+      --stroke: #e0d9cf;
+      --shadow: 0 16px 40px rgba(17, 18, 20, 0.12);
+      --radius: 18px;
+    }
+
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      color: var(--ink);
+      font-family: "Space Grotesk", "SF Pro Text", -apple-system, sans-serif;
+      background: radial-gradient(1200px 800px at 20% -10%, #fff7ea 0%, var(--bg) 45%, var(--bg-deep) 100%);
+    }
+
+    a { color: inherit; text-decoration: none; }
+
+    .page {
+      max-width: 1120px;
+      margin: 0 auto;
+      padding: 24px 24px 96px;
+    }
+
+    header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 12px 0 24px;
+    }
+
+    .logo {
+      display: flex;
+      align-items: center;
+      gap: 14px;
+      font-weight: 700;
+      letter-spacing: -0.02em;
+    }
+
+    .logo img {
+      width: 44px;
+      height: 44px;
+      border-radius: 12px;
+      box-shadow: var(--shadow);
+      background: #fff;
+    }
+
+    .nav {
+      display: flex;
+      gap: 18px;
+      font-size: 14px;
+      color: var(--muted);
+    }
+
+    .hero {
+      display: grid;
+      grid-template-columns: repeat(12, 1fr);
+      gap: 24px;
+      align-items: center;
+      padding: 30px 0 60px;
+    }
+
+    .hero-copy {
+      grid-column: span 6;
+    }
+
+    .hero h1 {
+      font-family: "Fraunces", serif;
+      font-size: clamp(36px, 4vw, 56px);
+      line-height: 1.05;
+      margin: 0 0 16px;
+    }
+
+    .hero p {
+      font-size: 18px;
+      line-height: 1.6;
+      margin: 0 0 24px;
+      color: var(--muted);
+    }
+
+    .cta-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 12px;
+      align-items: center;
+    }
+
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      gap: 10px;
+      padding: 12px 18px;
+      border-radius: 999px;
+      font-weight: 600;
+      border: 1px solid transparent;
+      transition: transform 0.15s ease, box-shadow 0.15s ease;
+    }
+
+    .btn.primary {
+      background: var(--accent);
+      color: #fff;
+      box-shadow: 0 14px 26px rgba(27, 143, 122, 0.25);
+    }
+
+    .btn.secondary {
+      background: var(--card);
+      border-color: var(--stroke);
+      color: var(--ink);
+    }
+
+    .btn:hover { transform: translateY(-1px); }
+
+    .hero-card {
+      grid-column: span 6;
+      background: var(--card);
+      border-radius: var(--radius);
+      padding: 22px;
+      box-shadow: var(--shadow);
+      border: 1px solid var(--stroke);
+      position: relative;
+      overflow: hidden;
+    }
+
+    .hero-card::after {
+      content: "";
+      position: absolute;
+      inset: auto -40% -60% auto;
+      width: 420px;
+      height: 420px;
+      background: radial-gradient(circle at center, rgba(238, 122, 79, 0.25), transparent 70%);
+    }
+
+    .window {
+      border: 1px solid var(--stroke);
+      border-radius: 16px;
+      overflow: hidden;
+      background: #fdfdfd;
+    }
+
+    .window-bar {
+      background: #f2eee8;
+      padding: 10px 14px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .dot { width: 10px; height: 10px; border-radius: 50%; background: #d1c7bb; }
+
+    .mock {
+      padding: 16px;
+      display: grid;
+      grid-template-columns: 180px 1fr 220px;
+      gap: 12px;
+    }
+
+    .pane {
+      background: #fff;
+      border: 1px solid var(--stroke);
+      border-radius: 12px;
+      min-height: 180px;
+      padding: 10px;
+      font-size: 12px;
+      color: #70757a;
+    }
+
+    .pane strong { color: #2b2f33; }
+
+    .section {
+      margin-top: 60px;
+    }
+
+    .section h2 {
+      font-family: "Fraunces", serif;
+      font-size: 28px;
+      margin: 0 0 12px;
+    }
+
+    .section p { color: var(--muted); margin: 0 0 24px; }
+
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+      gap: 18px;
+    }
+
+    .card {
+      background: var(--card);
+      border: 1px solid var(--stroke);
+      border-radius: var(--radius);
+      padding: 18px;
+      box-shadow: 0 8px 20px rgba(17, 18, 20, 0.08);
+    }
+
+    .card h3 { margin: 0 0 8px; font-size: 18px; }
+    .card p { margin: 0; color: var(--muted); font-size: 14px; }
+
+    .pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      background: #f4f1eb;
+      color: #2b2f33;
+      border-radius: 999px;
+      padding: 8px 14px;
+      font-size: 13px;
+      border: 1px solid var(--stroke);
+    }
+
+    footer {
+      margin-top: 80px;
+      padding-top: 24px;
+      border-top: 1px solid var(--stroke);
+      display: flex;
+      flex-wrap: wrap;
+      gap: 16px;
+      justify-content: space-between;
+      color: var(--muted);
+      font-size: 13px;
+    }
+
+    @media (max-width: 920px) {
+      .hero { grid-template-columns: 1fr; }
+      .hero-copy, .hero-card { grid-column: span 1; }
+    }
+  </style>
+</head>
+<body>
+  <div class="page">
+    <header>
+      <div class="logo">
+        <img src="assets/icon.png" alt="S3 Object Browser icon" />
+        <span>S3 Object Browser</span>
+      </div>
+      <nav class="nav">
+        <a href="#features">Features</a>
+        <a href="#compat">Compatibility</a>
+        <a href="#privacy">Privacy</a>
+      </nav>
+    </header>
+
+    <section class="hero">
+      <div class="hero-copy">
+        <h1>Manage object storage fast, on macOS.</h1>
+        <p>S3 Object Browser is a native client for S3 and S3‑compatible storage. Browse buckets, inspect metadata, migrate data, and review usage metrics — with a clean, focused UI.</p>
+        <div class="cta-row">
+          <a class="btn primary" href="#download">Download on Mac App Store</a>
+          <a class="btn secondary" href="#features">See features</a>
+        </div>
+        <div style="margin-top: 16px; display:flex; gap:10px; flex-wrap:wrap;">
+          <span class="pill">Native macOS</span>
+          <span class="pill">S3 + compatible</span>
+          <span class="pill">Azure Blob support</span>
+        </div>
+      </div>
+
+      <div class="hero-card">
+        <div class="window">
+          <div class="window-bar">
+            <div class="dot"></div>
+            <div class="dot"></div>
+            <div class="dot"></div>
+          </div>
+          <div class="mock">
+            <div class="pane"><strong>Profiles</strong><br>Endpoints, regions, keys</div>
+            <div class="pane"><strong>Objects</strong><br>List, search, select</div>
+            <div class="pane"><strong>Inspector</strong><br>ETag, size, metadata</div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section id="features" class="section">
+      <h2>What you can do</h2>
+      <p>Focused tools for day‑to‑day storage work without the noise.</p>
+      <div class="grid">
+        <div class="card">
+          <h3>Browse buckets & objects</h3>
+          <p>Navigate S3 buckets or Azure containers with fast, responsive lists.</p>
+        </div>
+        <div class="card">
+          <h3>Inspect metadata</h3>
+          <p>See size, content type, ETag, and last modified at a glance.</p>
+        </div>
+        <div class="card">
+          <h3>Data Migration</h3>
+          <p>Cross‑platform data migration for any S3‑compatible and Azure Blob storage.</p>
+        </div>
+        <div class="card">
+          <h3>Create buckets/containers</h3>
+          <p>Right‑click creation with validation and optional features.</p>
+        </div>
+        <div class="card">
+          <h3>Professional Metrics</h3>
+          <p>Professional usage metrics for price estimation and debug logging.</p>
+        </div>
+        <div class="card">
+          <h3>Localization ready</h3>
+          <p>Multi‑language UI built in for global teams.</p>
+        </div>
+      </div>
+    </section>
+
+    <section id="compat" class="section">
+      <h2>Compatibility</h2>
+      <p>Works with AWS S3 and many S3‑compatible providers, plus Azure Blob Storage.</p>
+      <div class="grid">
+        <div class="card">
+          <h3>S3 providers</h3>
+          <p>AWS S3, MinIO, Ceph, and other S3‑compatible endpoints.</p>
+        </div>
+        <div class="card">
+          <h3>Azure Blob</h3>
+          <p>Containers, blobs, and migration support for Azure Storage accounts.</p>
+        </div>
+        <div class="card">
+          <h3>macOS</h3>
+          <p>Optimized for modern macOS with sandbox support.</p>
+        </div>
+      </div>
+    </section>
+
+    <section id="privacy" class="section">
+      <h2>Privacy & security</h2>
+      <p>Credentials stay on your Mac. The app operates within macOS sandboxing and only connects to endpoints you configure.</p>
+    </section>
+
+    <section id="download" class="section">
+      <h2>Get it on the Mac App Store</h2>
+      <p>Add your App Store public URL here once it’s live.</p>
+      <div class="cta-row">
+        <a class="btn primary" href="https://apps.apple.com/">Open Mac App Store</a>
+        <a class="btn secondary" href="https://github.com/yakoda-sudo/s3-mac-browser">GitHub Repo</a>
+      </div>
+    </section>
+
+    <footer>
+      <div>© 2026 S3 Object Browser</div>
+      <div>Support: <a href="mailto:yangqi.kou@gmail.com">yangqi.kou@gmail.com</a></div>
+    </footer>
+  </div>
+</body>
+</html>
