@@ -1,4 +1,4 @@
-# s3-mac-browser
+# s3-Object-browser
 <img width="256" height="256" alt="image" src="https://github.com/user-attachments/assets/767cc93e-c83c-49cb-8660-dc4557f2fc2b" />
 
 
@@ -76,10 +76,10 @@ xattr -dr com.apple.quarantine "/Applications/s3-mac-browser.app"
 ## Project Structure
 
 ```
-S3MacBrowserDemo/
+S3objecBrowserDemo/
   Package.swift
   Sources/
-    S3MacBrowserDemoApp/
+    S3objBrowserDemoApp/
       Models/
       Services/
       ViewModels/
